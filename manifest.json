@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Miner",
-  "version": "1.0",
-  "description": "Helps downloading bulk files",
+  "name": "Miner - Toplu PDF İndirici",
+  "version": "1.1",
+  "description": "GİB, SGK E-Bildirge ve E-Beyanname portallarından toplu PDF indirme aracı. Beyanname, tahakkuk ve hizmet belgelerini otomatik klasörleyerek indirir. Destek: nuh@ziyahanbasar.com",
   "permissions": [
     "activeTab",
     "scripting",

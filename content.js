@@ -201,24 +201,72 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Log kayıtları
         const downloadLog = [];
         const startTime = getTimestamp();
-        downloadLog.push(`MINER İNDİRME RAPORU`);
-        downloadLog.push(`====================`);
-        downloadLog.push(`Başlangıç: ${startTime}`);
-        downloadLog.push(`Sayfa: ${window.location.href}`);
-        downloadLog.push(`Toplam Dosya: ${targets.length}`);
-        downloadLog.push(`Hedef Klasör: ${basePath}`);
+        const totalOnPage = allTargets.length;
+        const selectedCount = targets.length;
+        let successCount = 0;
+        let failCount = 0;
+        const downloadedItems = [];
+        const failedItems = [];
+
+        // Tüm hedeflerin listesini oluştur
+        const allTargetInfo = targets.map((t, i) => ({
+            index: i,
+            docType: findDocType(t),
+            status: 'bekliyor'
+        }));
+
+        downloadLog.push(`════════════════════════════════════════════════════════`);
+        downloadLog.push(`                  MINER İNDİRME RAPORU`);
+        downloadLog.push(`════════════════════════════════════════════════════════`);
         downloadLog.push(``);
-        downloadLog.push(`İNDİRİLEN DOSYALAR:`);
-        downloadLog.push(`-------------------`);
+        downloadLog.push(`Tarih/Saat    : ${startTime}`);
+        downloadLog.push(`Site Türü     : ${config.name}`);
+        downloadLog.push(`Sayfa URL     : ${window.location.href}`);
+        downloadLog.push(`Hedef Klasör  : ${basePath}`);
+        downloadLog.push(``);
+        downloadLog.push(`────────────────────────────────────────────────────────`);
+        downloadLog.push(`                      ÖZET BİLGİLER`);
+        downloadLog.push(`────────────────────────────────────────────────────────`);
+        downloadLog.push(`Sayfadaki Toplam Link : ${totalOnPage}`);
+        downloadLog.push(`Seçilen Link Sayısı   : ${selectedCount}`);
+        downloadLog.push(``);
+        downloadLog.push(`────────────────────────────────────────────────────────`);
+        downloadLog.push(`                   İNDİRME LİSTESİ`);
+        downloadLog.push(`────────────────────────────────────────────────────────`);
 
         function processNext() {
             if (index >= targets.length) {
-                // İndirme bitti, log dosyasını oluştur
+                // İndirme bitti, özet raporu oluştur
                 const endTime = getTimestamp();
+
                 downloadLog.push(``);
-                downloadLog.push(`-------------------`);
-                downloadLog.push(`Bitiş: ${endTime}`);
-                downloadLog.push(`Toplam İndirilen: ${index} dosya`);
+                downloadLog.push(`────────────────────────────────────────────────────────`);
+                downloadLog.push(`                      SONUÇ RAPORU`);
+                downloadLog.push(`────────────────────────────────────────────────────────`);
+                downloadLog.push(`Bitiş Zamanı          : ${endTime}`);
+                downloadLog.push(`Başarılı İndirme      : ${successCount} / ${selectedCount}`);
+                downloadLog.push(`Başarısız             : ${failCount}`);
+                downloadLog.push(``);
+
+                if (downloadedItems.length > 0) {
+                    downloadLog.push(`✓ İNDİRİLEN DOSYALAR (${downloadedItems.length}):`);
+                    downloadedItems.forEach(item => {
+                        downloadLog.push(`  • ${item}`);
+                    });
+                    downloadLog.push(``);
+                }
+
+                if (failedItems.length > 0) {
+                    downloadLog.push(`✗ BAŞARISIZ OLANLAR (${failedItems.length}):`);
+                    failedItems.forEach(item => {
+                        downloadLog.push(`  • ${item}`);
+                    });
+                    downloadLog.push(``);
+                }
+
+                downloadLog.push(`════════════════════════════════════════════════════════`);
+                downloadLog.push(`                    RAPOR SONU`);
+                downloadLog.push(`════════════════════════════════════════════════════════`);
 
                 // Log dosyasını background'a gönder
                 chrome.runtime.sendMessage({
@@ -227,16 +275,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     logContent: downloadLog.join('\n')
                 });
 
-                log("Tamamlandı!");
-                chrome.runtime.sendMessage({ action: "updateStatus", message: "Tamamlandı!", completed: true });
+                log(`Tamamlandı! (${successCount}/${selectedCount} başarılı)`);
+                chrome.runtime.sendMessage({ action: "updateStatus", message: `Tamamlandı! (${successCount}/${selectedCount})`, completed: true });
                 return;
             }
 
             const el = targets[index];
             const docType = findDocType(el);
             const timestamp = getTimestamp();
+            const currentNum = index + 1;
 
-            log(`İndiriliyor ${index + 1}/${targets.length} (${docType})`);
+            log(`İndiriliyor ${currentNum}/${targets.length} (${docType})`);
 
             el.style.border = "3px solid green";
 
@@ -250,14 +299,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }, () => {
                 // Config ayarlandı, şimdi tıkla
                 setTimeout(() => {
-                    try { el.click(); } catch(e) {}
+                    let clickSuccess = false;
+                    try {
+                        el.click();
+                        clickSuccess = true;
+                    } catch(e) {
+                        console.error("[Miner] Click error:", e);
+                        clickSuccess = false;
+                    }
 
                     // Log kaydı ekle
-                    downloadLog.push(`[${timestamp}] ${index + 1}. ${docType} -> ${basePath}/${docType}/`);
+                    const itemPath = `${basePath}/${docType}/`;
+                    if (clickSuccess) {
+                        successCount++;
+                        downloadedItems.push(`[${currentNum}] ${docType}`);
+                        downloadLog.push(`[${timestamp}] ✓ ${currentNum}. ${docType} -> ${itemPath}`);
+                    } else {
+                        failCount++;
+                        failedItems.push(`[${currentNum}] ${docType} (tıklama hatası)`);
+                        downloadLog.push(`[${timestamp}] ✗ ${currentNum}. ${docType} -> HATA`);
+                    }
 
                     // Sonraki dosyaya geç
                     setTimeout(() => {
-                        el.style.border = "";
+                        el.style.border = clickSuccess ? "" : "3px solid red";
                         index++;
                         // Her 5 dosyada bir biraz daha bekle (E-Beyanname hariç)
                         const delay = isEbeyanname ? betweenDelay : ((index % 5 === 0) ? 5000 : betweenDelay);
