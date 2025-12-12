@@ -45,12 +45,18 @@ document.addEventListener('DOMContentLoaded', () => {
         // SGK için
         const sgkTargets = Array.from(document.querySelectorAll('a[onclick*="islem(\'TD\'"], a[onclick*="islem(\'HD\'"], a[onclick*="islem(\'SHD\'"]'));
 
+        // E-Beyanname Portal için (DOM sırasına göre - satır bazlı)
+        const ebeyannameTargets = Array.from(document.querySelectorAll('img[src*="pdf_b.gif"], img[src*="pdf_t.gif"]'));
+
         let targets = [];
         let siteType = 'unknown';
 
         if (sgkTargets.length > 0) {
             siteType = 'sgk';
             targets = sgkTargets;
+        } else if (ebeyannameTargets.length > 0) {
+            siteType = 'ebeyanname';
+            targets = ebeyannameTargets;
         } else if (gibTargets.length > 0) {
             siteType = 'gib';
             targets = [...new Set(gibTargets)];
@@ -77,6 +83,37 @@ document.addEventListener('DOMContentLoaded', () => {
                             const period = firstCell.innerText.trim().replace('/', '-').replace(' ', '');
                             type = period + " - " + subType;
                         }
+                    }
+                } else if (siteType === 'ebeyanname') {
+                    // E-Beyanname Portal: Firma/Dönem - BeyannameTürü (Beyanname/Tahakkuk)
+                    // PDF ikonları iç içe tabloda, ana satırı bulmak için id="row..." veya class="blAG" ara
+                    const src = t.getAttribute('src') || '';
+                    subType = src.includes('pdf_b.gif') ? 'Beyanname' : 'Tahakkuk';
+
+                    // Ana satırı bul (iç tablonun TR'si değil)
+                    const row = t.closest('tr[id^="row"]') || t.closest('tr.blAG');
+                    if (row) {
+                        // Sadece doğrudan çocuk TD'leri al
+                        const cells = row.querySelectorAll(':scope > td');
+
+                        // Firma: title attribute veya textContent
+                        let firma = "Firma";
+                        if (cells[3]) {
+                            firma = (cells[3].getAttribute('title') || cells[3].textContent.trim()).substring(0, 30);
+                        }
+
+                        // Beyanname türü
+                        let beyType = cells[1] ? cells[1].textContent.trim() : "";
+
+                        // Dönem: "09/2025-09/2025" -> ilk kısmı al "09-2025"
+                        let donem = "Dönem";
+                        if (cells[5]) {
+                            const donemText = cells[5].textContent.trim();
+                            const parts = donemText.split('-');
+                            donem = parts[0].trim().replace('/', '-');
+                        }
+
+                        type = `${firma}/${donem} - ${beyType} ${subType}`;
                     }
                 } else {
                     // GİB
