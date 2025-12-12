@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Mock Miner Target Page (Real Data)</title>
+    <style>
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            border: 1px solid #ccc;
+            font-family: sans-serif;
+            font-size: 12px;
+        }
+
+        td,
+        th {
+            border: 1px solid #ccc;
+            padding: 4px;
+        }
+
+        .csc-image {
+            cursor: pointer;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Miner Real HTML Test</h1>
+
+    <div id="log"
+        style="position: fixed; top: 10px; right: 10px; background: #eee; padding: 10px; border: 1px solid #999; max-height: 90vh; overflow: auto; width: 350px;">
+        <strong>Activity Log:</strong><br>
+    </div>
+
+    <!-- User provided HTML structure -->
+    <table id="gen__1354-t" rel="table">
+        <thead id="gen__1354-h">
+            <tr rel="def-tr">
+                <th style="width: 167px;"><span>Beyanname Türü</span></th>
+                <th style="text-align: center; width: 167px;"><span>Vergilendirme Dönemi</span></th>
+                <th style="width: 167px;"><span>Düzeltme Gerekçesi</span></th>
+                <th style="width: 166px;"><span>Kaynak</span></th>
+                <th style="text-align: center; width: 83px;"><span>Beyanname Görüntüle</span></th>
+            </tr>
+        </thead>
+        <tbody id="gen__1354-b">
+            <tr rel="0" rowid="0">
+                <td><span id="gen__1361" class="csc-rospan" style="white-space: normal;">DAMGA_5</span></td>
+                <td style="text-align: center;"><span id="gen__1362">12/2024-12/2024</span></td>
+                <td><span id="gen__1363"></span></td>
+                <td><span id="gen__1364">internet</span></td>
+                <td style="text-align: center;"><img id="gen__1365" src="sf/img/pdfb.gif" title="Beyanname Görüntüle"
+                        draggable="false" droppable="false" class="csc-image selectable" onclick="mockDownload(this)">
+                </td>
+            </tr>
+            <tr rel="2" rowid="2">
+                <td><span id="gen__1373" class="csc-rospan" style="white-space: normal;">KDV1_39</span></td>
+                <td style="text-align: center;"><span id="gen__1374">12/2024-12/2024</span></td>
+                <td><span id="gen__1375"></span></td>
+                <td><span id="gen__1376">internet</span></td>
+                <td style="text-align: center;"><img id="gen__1377" src="sf/img/pdfb.gif" title="Beyanname Görüntüle"
+                        draggable="false" droppable="false" class="csc-image selectable" onclick="mockDownload(this)">
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <script>
+        function mockDownload(element) {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+
+            // Try to find type to verify script logic
+            let type = "Unknown";
+            try {
+                const row = element.closest('tr');
+                const text = row.querySelector('td span').innerText; // Simple approximation for mock
+                type = text.split('_')[0];
+            } catch (e) { }
+
+            entry.textContent = `[${new Date().toLocaleTimeString()}] Clicked image for ${type}`;
+            entry.style.borderBottom = "1px solid #ccc";
+            log.appendChild(entry);
+
+            // Trigger actual download for Chrome API testing
+            const a = document.createElement('a');
+            a.href = "data:text/plain;charset=utf-8,TestContent";
+            a.download = `mock_file_${type}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+    </script>
+</body>
+
+</html>

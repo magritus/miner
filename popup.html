@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <style>
+    body {
+      width: 300px;
+      padding: 10px;
+      font-family: sans-serif;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px;
+      cursor: pointer;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      font-size: 16px;
+      margin-top: 10px;
+    }
+
+    button:disabled {
+      background-color: #ccc;
+    }
+
+    .status {
+      margin-bottom: 10px;
+      font-weight: bold;
+    }
+
+    #list {
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 12px;
+      border: 1px solid #ddd;
+      padding: 5px;
+      margin-top: 5px;
+    }
+
+    .item {
+      padding: 2px 0;
+      border-bottom: 1px solid #eee;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="status" id="status">Scanning...</div>
+
+  <div style="margin: 10px 0;">
+    <label for="basePath" style="display:block; font-size:12px; font-weight:bold;">Base Folder (inside
+      Downloads):</label>
+    <input type="text" id="basePath" value="MinerDownloads" style="width: 100%; box-sizing: border-box; padding: 5px;">
+  </div>
+
+  <div id="list"></div>
+  <button id="downloadBtn" disabled>Download All</button>
+  <script src="popup.js"></script>
+</body>
+
+</html>
