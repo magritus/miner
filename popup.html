@@ -24,6 +24,14 @@
       background-color: #ccc;
     }
 
+    #stopBtn {
+      background-color: #e53935;
+    }
+
+    #stopBtn:disabled {
+      background-color: #ccc;
+    }
+
     .status {
       margin-bottom: 10px;
       font-weight: bold;
@@ -56,6 +64,7 @@
 
   <div id="list"></div>
   <button id="downloadBtn" disabled>Download All</button>
+  <button id="stopBtn" style="display:none;">Durdur</button>
   <script src="popup.js"></script>
 </body>
 

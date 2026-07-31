@@ -2,18 +2,23 @@
 (function() {
     if (window.__minerInterceptSetup) return;
     window.__minerInterceptSetup = true;
+    // NOT: __minerInterceptEnabled hiç açılmıyor (aşağıdaki XHR/Fetch/Blob/<a> intercept'leri
+    // kasıtlı olarak devre dışı bırakıldı - content.js bu event'leri dinlemiyor, açılırsa
+    // gerçek indirmeler sessizce yutulup kaybolabilir). Sadece window.open odak-koruması
+    // ayrı bir bayrakla (__minerFocusGuardEnabled) kontrol ediliyor, bkz. aşağı.
     window.__minerInterceptEnabled = false;
+    window.__minerFocusGuardEnabled = false;
 
     console.log("[Miner Inject] Setting up intercept for GİB...");
 
     // Content script'ten gelen mesajları dinle
     window.addEventListener('message', (event) => {
-        if (event.data?.type === 'MINER_ENABLE_INTERCEPT') {
-            window.__minerInterceptEnabled = true;
-            console.log("[Miner Inject] Intercept ENABLED");
-        } else if (event.data?.type === 'MINER_DISABLE_INTERCEPT') {
-            window.__minerInterceptEnabled = false;
-            console.log("[Miner Inject] Intercept DISABLED");
+        if (event.data?.type === 'MINER_ENABLE_FOCUS_GUARD') {
+            window.__minerFocusGuardEnabled = true;
+            console.log("[Miner Inject] Focus guard ENABLED");
+        } else if (event.data?.type === 'MINER_DISABLE_FOCUS_GUARD') {
+            window.__minerFocusGuardEnabled = false;
+            console.log("[Miner Inject] Focus guard DISABLED");
         }
     });
 
@@ -116,8 +121,19 @@
         return originalAnchorClick.call(this);
     };
 
-    // Focus çalmayı engelle
-    window.focus = function() {};
+    // ============ window.open INTERCEPT (odak çalmayı kaynağında azalt) ============
+    // GİB/SGK/E-Beyanname PDF'i genelde window.open ile yeni pencere/sekmede açıyor,
+    // tarayıcı da bunu otomatik öne getiriyor. Pencereyi engellemek yerine (site JS'i
+    // referansı kullanıyor olabilir, kırılma riski var), açılır açılmaz odağı geri alıyoruz.
+    const originalWindowOpen = window.open;
+    window.open = function(...args) {
+        const newWin = originalWindowOpen.apply(this, args);
+        if (window.__minerFocusGuardEnabled && newWin) {
+            try { newWin.blur(); } catch (e) { }
+            try { window.focus(); } catch (e) { }
+        }
+        return newWin;
+    };
 
-    console.log("[Miner Inject] Setup complete - XHR, Fetch, Blob intercepts ready!");
+    console.log("[Miner Inject] Setup complete - XHR, Fetch, Blob, window.open intercepts ready!");
 })();

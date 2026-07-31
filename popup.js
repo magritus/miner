@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusDiv = document.getElementById('status');
     const listDiv = document.getElementById('list');
     const downloadBtn = document.getElementById('downloadBtn');
+    const stopBtn = document.getElementById('stopBtn');
     const basePathInput = document.getElementById('basePath');
 
     // Load saved settings
@@ -43,7 +44,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const gibTargets = Array.from(document.querySelectorAll('img[title="Beyanname Görüntüle"], img[src*="pdfb.gif"]'));
 
         // SGK için
-        const sgkTargets = Array.from(document.querySelectorAll('a[onclick*="islem(\'TD\'"], a[onclick*="islem(\'HD\'"], a[onclick*="islem(\'SHD\'"]'));
+        // SHD (S.Hizmet) KASITLI OLARAK DISARIDA: ucret bilgisi icermiyor, ise yaramiyor.
+        // !!! content.js icindeki SITE_CONFIGS.sgk.getTargets secicisi ile BIREBIR AYNI kalmali;
+        // aksi halde liste ile indirme sirasi kayar ve yanlis belge iner.
+        const sgkTargets = Array.from(document.querySelectorAll('a[onclick*="islem(\'TD\'"], a[onclick*="islem(\'HD\'"]'));
 
         // E-Beyanname Portal için (DOM sırasına göre - satır bazlı)
         const ebeyannameTargets = Array.from(document.querySelectorAll('img[src*="pdf_b.gif"], img[src*="pdf_t.gif"]'));
@@ -243,6 +247,10 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadBtn.disabled = true;
         statusDiv.textContent = "Downloading...";
 
+        stopBtn.style.display = 'block';
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'Durdur';
+
         if (currentActiveTabId) {
             chrome.tabs.sendMessage(currentActiveTabId, {
                 action: "download",
@@ -250,10 +258,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 basePath: basePath,
                 indices: selectedIndices // Send specific indices
             }, { frameId: targetFrameId }, (response) => {
+                // Content script "started" dediyse indirme BASLADI -> asla tekrar gonderme.
+                // Yoksa ayni indirme iki kez calisir ve her dosya mukerrer iner.
+                if (response && response.started) {
+                    log("Indirme basladi.");
+                    return;
+                }
+                if (response && response.reason === "already_running") {
+                    log("Zaten bir indirme suruyor.");
+                    return;
+                }
+
                 if (chrome.runtime.lastError) {
                     log("Frame Msg Error: " + chrome.runtime.lastError.message + ". Retrying globally...");
-                    // Fallback: The content script might not be injected in that frame or connection broke.
-                    // Force inject content.js again to all frames to be sure, then send message.
+                    // Content script o frame'e hic enjekte edilmemis olabilir.
+                    // Sadece BU durumda yeniden enjekte edip tekrar deniyoruz.
                     chrome.scripting.executeScript({
                         target: { tabId: currentActiveTabId, allFrames: true },
                         files: ['content.js']
@@ -278,6 +297,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Handle stop click
+    stopBtn.addEventListener('click', () => {
+        stopBtn.disabled = true;
+        stopBtn.textContent = 'Durduruluyor...';
+
+        if (currentActiveTabId) {
+            chrome.tabs.sendMessage(currentActiveTabId, { action: "stop" }, { frameId: targetFrameId }, () => {
+                if (chrome.runtime.lastError) {
+                    log("Stop msg error: " + chrome.runtime.lastError.message);
+                }
+            });
+        }
+    });
+
     // Listen for progress updates
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === "updateStatus") {
@@ -297,6 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (request.completed) {
                 downloadBtn.disabled = false;
                 downloadBtn.textContent = "Done (Click to Retry)";
+                stopBtn.style.display = 'none';
             }
         }
     });
