@@ -118,6 +118,11 @@ const SITE_CONFIGS = {
     // E-Beyanname Portalı
     ebeyanname: {
         name: "E-Beyanname Portal",
+        // GİB ile aynı VEDOP kalıbı: beyannameGoruntule() adresi TOKEN + beyannameOid
+        // ile tıklama anında kuruyor ve callMenuUrlPopUp ile açıyor. Dışarıdan
+        // kuramayız; window.open'ı yakalayıp pencereyi açtırmadan adresi alıyoruz.
+        // Yakalama tutmazsa otomatik olarak eski tıklama yöntemine düşülür.
+        captureOnClick: true,
         match: () => document.querySelector('img[src*="pdf_b.gif"]') || document.querySelector('img[src*="pdf_t.gif"]'),
         getTargets: () => {
             // Satır bazlı sıralama: Her şirket için önce beyanname sonra tahakkuk
