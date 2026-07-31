@@ -9,6 +9,11 @@ const SITE_CONFIGS = {
     // GİB İnternet Vergi Dairesi
     gib: {
         name: "GİB Beyanname",
+        // GİB'in indirme adresini (beyannameOid + token) sayfanın kendi JS'i tıklama
+        // anında üretiyor; dışarıdan kuramayız. Bu yüzden SGK'daki gibi buildRequest
+        // yazamıyoruz. Bunun yerine tıklıyoruz ama inject.js window.open'ı yakalayıp
+        // pencereyi AÇTIRMIYOR, sadece adresi bize veriyor -> odak çalınmıyor.
+        captureOnClick: true,
         match: () => document.querySelector('img[src*="pdfb.gif"]') || document.querySelector('img[title="Beyanname Görüntüle"]'),
         getTargets: () => {
             const byTitle = Array.from(document.querySelectorAll('img[title="Beyanname Görüntüle"]'));
@@ -285,6 +290,44 @@ function saveFileViaBackground(payload) {
     });
 }
 
+// Elemana tıkla ama açılacak pencereyi inject.js engellesin; sadece adresi al.
+// GİB gibi adresi kendi JS'i üreten siteler için.
+function captureUrlFromClick(el, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        let bitti = false;
+        let zamanlayici = null;
+
+        const temizle = () => {
+            window.removeEventListener('minerUrlCaptured', yakalandi);
+            if (zamanlayici) clearTimeout(zamanlayici);
+        };
+
+        function yakalandi(e) {
+            if (bitti) return;
+            bitti = true;
+            temizle();
+            const url = e.detail && e.detail.url;
+            if (url) resolve(url);
+            else reject(new Error("Adres çözümlenemedi"));
+        }
+
+        window.addEventListener('minerUrlCaptured', yakalandi);
+
+        zamanlayici = setTimeout(() => {
+            if (bitti) return;
+            bitti = true;
+            temizle();
+            reject(new Error(`Adres yakalanamadı (${timeoutMs}ms) - sayfa pencere açmadı`));
+        }, timeoutMs);
+
+        try {
+            el.click();
+        } catch (e) {
+            if (!bitti) { bitti = true; temizle(); reject(new Error("Tıklama hatası: " + e.message)); }
+        }
+    });
+}
+
 // PDF'i belleğe indir ve diske yaz. { ok, error, status } döner.
 async function fetchPdfAndSave(req, basePath, folder, fallbackName) {
     let resp;
@@ -462,7 +505,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Pencere açma maliyeti olmadığı için kısa; ama sunucuyu zorlamamak için sıfır değil.
         const FETCH_DELAY = 800;
         const SLOW_FETCH_DELAY = 8000; // 503/429 sonrası nezaket modu
+        const CAPTURE_TIMEOUT = 5000;  // GİB: window.open adresini bekleme süresi
         let slowMode = false;
+
+        // GİB gibi adresi tıklama anında üreten siteler: inject.js window.open'ı
+        // yakalasın, pencere açılmasın. Sadece bu modda gerekli.
+        if (config.captureOnClick) {
+            window.postMessage({ type: "MINER_ENABLE_CAPTURE" }, window.location.origin);
+        }
 
         // Site'e özel bekleme süreleri (ms)
         const isEbeyanname = config.name === "E-Beyanname Portal";
@@ -520,6 +570,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             // Odak koruması sadece indirme sürerken açık kalmalı
             safeSendMessage({ action: "stopFocusGuard" });
             window.postMessage({ type: "MINER_DISABLE_FOCUS_GUARD" }, window.location.origin);
+            // Yakalama modu kapatılmazsa kullanıcının kendi tıkladığı linkler de açılmaz!
+            window.postMessage({ type: "MINER_DISABLE_CAPTURE" }, window.location.origin);
             hideStopOverlay();
 
             downloadLog.push(``);
@@ -575,6 +627,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             if (!isExtensionContextValid()) {
                 console.warn("[Miner] Extension context invalidated, indirme durduruluyor. Sayfayı yenileyip tekrar deneyin.");
                 downloadState.active = false;
+                // Yakalama modu acik kalirsa kullanicinin kendi tikladigi linkler de
+                // acilmaz. Sayfayi bu halde birakma.
+                window.postMessage({ type: "MINER_DISABLE_CAPTURE" }, window.location.origin);
+                window.postMessage({ type: "MINER_DISABLE_FOCUS_GUARD" }, window.location.origin);
+                hideStopOverlay();
                 return;
             }
 
@@ -602,6 +659,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
             if (req) {
                 handleFetchItem(req, el, docType, timestamp, currentNum);
+            } else if (config.captureOnClick) {
+                handleCaptureItem(el, docType, timestamp, currentNum);
             } else {
                 handleClickItem(el, docType, timestamp, currentNum);
             }
@@ -641,6 +700,33 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     el.style.border = result.ok ? "" : "3px solid red";
 
                     // Sunucu zorlanıyorsa yavaşla, düzelirse normale dön
+                    if (result.status === 503 || result.status === 429) {
+                        if (!slowMode) log("Sunucu yoğun (503/429), tempo düşürülüyor...");
+                        slowMode = true;
+                    } else if (result.ok) {
+                        slowMode = false;
+                    }
+
+                    scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
+                })
+                .catch((err) => {
+                    recordResult(false, err.message, docType, timestamp, currentNum);
+                    el.style.border = "3px solid red";
+                    scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
+                });
+        }
+
+        // ---- Sessiz yol 2 (GİB): tıkla ama pencereyi açtırma, adresi yakala ----
+        function handleCaptureItem(el, docType, timestamp, currentNum) {
+            const fileType = config.getFileType ? config.getFileType(el) : "Beyanname";
+            const fallbackName = `${docType}_${fileType}_${currentNum}.pdf`;
+
+            captureUrlFromClick(el, CAPTURE_TIMEOUT)
+                .then((url) => fetchPdfAndSave({ url: url, method: 'GET' }, basePath, docType, fallbackName))
+                .then((result) => {
+                    recordResult(result.ok, result.error, docType, timestamp, currentNum);
+                    el.style.border = result.ok ? "" : "3px solid red";
+
                     if (result.status === 503 || result.status === 429) {
                         if (!slowMode) log("Sunucu yoğun (503/429), tempo düşürülüyor...");
                         slowMode = true;

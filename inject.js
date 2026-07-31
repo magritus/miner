@@ -8,6 +8,8 @@
     // ayrı bir bayrakla (__minerFocusGuardEnabled) kontrol ediliyor, bkz. aşağı.
     window.__minerInterceptEnabled = false;
     window.__minerFocusGuardEnabled = false;
+    // Yakalama modu: window.open'i ACTIRMADAN adresi content script'e verir (GIB).
+    window.__minerCaptureEnabled = false;
 
     console.log("[Miner Inject] Setting up intercept for GİB...");
 
@@ -19,8 +21,26 @@
         } else if (event.data?.type === 'MINER_DISABLE_FOCUS_GUARD') {
             window.__minerFocusGuardEnabled = false;
             console.log("[Miner Inject] Focus guard DISABLED");
+        } else if (event.data?.type === 'MINER_ENABLE_CAPTURE') {
+            window.__minerCaptureEnabled = true;
+            console.log("[Miner Inject] Capture mode ENABLED");
+        } else if (event.data?.type === 'MINER_DISABLE_CAPTURE') {
+            window.__minerCaptureEnabled = false;
+            console.log("[Miner Inject] Capture mode DISABLED");
         }
     });
+
+    // Sayfa JS'i acilan pencerenin referansini kullanabilir (ornegin .focus()).
+    // Pencereyi actirmadigimiz icin cagrilari yutan zararsiz bir taklit donduruyoruz.
+    function sahtePencere() {
+        const bos = function () { };
+        return {
+            focus: bos, blur: bos, close: bos, print: bos, closed: false,
+            document: { write: bos, writeln: bos, close: bos, open: bos },
+            location: { href: '', replace: bos, assign: bos, reload: bos },
+            opener: null, name: '', history: { back: bos, forward: bos }
+        };
+    }
 
     function notifyBlobIntercepted(blob, filename) {
         console.log("[Miner Inject] Blob intercepted! Size:", blob.size);
@@ -126,8 +146,22 @@
     // tarayıcı da bunu otomatik öne getiriyor. Pencereyi engellemek yerine (site JS'i
     // referansı kullanıyor olabilir, kırılma riski var), açılır açılmaz odağı geri alıyoruz.
     const originalWindowOpen = window.open;
-    window.open = function(...args) {
-        const newWin = originalWindowOpen.apply(this, args);
+    window.open = function (url, ...rest) {
+        // YAKALAMA MODU (GIB): pencereyi hic acma. Adresi content script'e ver,
+        // o sessizce fetch etsin. Pencere yaratilmadigi icin odak da calinmaz.
+        if (window.__minerCaptureEnabled) {
+            try {
+                const mutlak = new URL(String(url), document.baseURI).href;
+                console.log("[Miner Inject] URL yakalandi, pencere acilmadi:", mutlak);
+                window.dispatchEvent(new CustomEvent('minerUrlCaptured', { detail: { url: mutlak } }));
+            } catch (e) {
+                console.error("[Miner Inject] URL yakalanamadi:", e);
+                window.dispatchEvent(new CustomEvent('minerUrlCaptured', { detail: { url: null } }));
+            }
+            return sahtePencere();
+        }
+
+        const newWin = originalWindowOpen.call(this, url, ...rest);
         if (window.__minerFocusGuardEnabled && newWin) {
             try { newWin.blur(); } catch (e) { }
             try { window.focus(); } catch (e) { }
