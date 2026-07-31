@@ -290,9 +290,10 @@ function saveFileViaBackground(payload) {
     });
 }
 
-// Elemana tıkla ama açılacak pencereyi inject.js engellesin; sadece adresi al.
-// GİB gibi adresi kendi JS'i üreten siteler için.
-function captureUrlFromClick(el, timeoutMs) {
+// Elemana tıkla ama açılacak pencereyi/form gönderimini inject.js engellesin;
+// sadece isteğin tarifini al. Adresi kendi JS'i üreten siteler için (GİB, E-Beyanname).
+// { url, method, body } döner - fetchPdfAndSave ile aynı biçim.
+function captureRequestFromClick(el, timeoutMs) {
     return new Promise((resolve, reject) => {
         let bitti = false;
         let zamanlayici = null;
@@ -306,9 +307,18 @@ function captureUrlFromClick(el, timeoutMs) {
             if (bitti) return;
             bitti = true;
             temizle();
-            const url = e.detail && e.detail.url;
-            if (url) resolve(url);
-            else reject(new Error("Adres çözümlenemedi"));
+            const d = e.detail || {};
+            if (!d.url) {
+                reject(new Error("Adres çözümlenemedi"));
+                return;
+            }
+            // body string olarak geliyor; URLSearchParams'a çevirince fetch
+            // Content-Type'ı (x-www-form-urlencoded) kendisi doğru ayarlıyor.
+            resolve({
+                url: d.url,
+                method: d.method || 'GET',
+                body: d.body ? new URLSearchParams(d.body) : undefined
+            });
         }
 
         window.addEventListener('minerUrlCaptured', yakalandi);
@@ -317,7 +327,9 @@ function captureUrlFromClick(el, timeoutMs) {
             if (bitti) return;
             bitti = true;
             temizle();
-            reject(new Error(`Adres yakalanamadı (${timeoutMs}ms) - sayfa pencere açmadı`));
+            const hata = new Error(`İstek yakalanamadı (${timeoutMs}ms)`);
+            hata.captureTimeout = true; // çağıran taraf eski yönteme düşsün
+            reject(hata);
         }, timeoutMs);
 
         try {
@@ -505,8 +517,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Pencere açma maliyeti olmadığı için kısa; ama sunucuyu zorlamamak için sıfır değil.
         const FETCH_DELAY = 800;
         const SLOW_FETCH_DELAY = 8000; // 503/429 sonrası nezaket modu
-        const CAPTURE_TIMEOUT = 5000;  // GİB: window.open adresini bekleme süresi
+        const CAPTURE_TIMEOUT = 5000;  // İsteğin yakalanması için bekleme süresi
         let slowMode = false;
+        let captureDisabled = false;   // yakalama tutmazsa eski yönteme kalıcı geçiş
 
         // GİB gibi adresi tıklama anında üreten siteler: inject.js window.open'ı
         // yakalasın, pencere açılmasın. Sadece bu modda gerekli.
@@ -659,7 +672,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
             if (req) {
                 handleFetchItem(req, el, docType, timestamp, currentNum);
-            } else if (config.captureOnClick) {
+            } else if (config.captureOnClick && !captureDisabled) {
                 handleCaptureItem(el, docType, timestamp, currentNum);
             } else {
                 handleClickItem(el, docType, timestamp, currentNum);
@@ -716,13 +729,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 });
         }
 
-        // ---- Sessiz yol 2 (GİB): tıkla ama pencereyi açtırma, adresi yakala ----
+        // ---- Sessiz yol 2 (GİB): tıkla ama pencereyi açtırma, isteği yakala ----
         function handleCaptureItem(el, docType, timestamp, currentNum) {
             const fileType = config.getFileType ? config.getFileType(el) : "Beyanname";
             const fallbackName = `${docType}_${fileType}_${currentNum}.pdf`;
 
-            captureUrlFromClick(el, CAPTURE_TIMEOUT)
-                .then((url) => fetchPdfAndSave({ url: url, method: 'GET' }, basePath, docType, fallbackName))
+            captureRequestFromClick(el, CAPTURE_TIMEOUT)
+                .then((req) => fetchPdfAndSave(req, basePath, docType, fallbackName))
                 .then((result) => {
                     recordResult(result.ok, result.error, docType, timestamp, currentNum);
                     el.style.border = result.ok ? "" : "3px solid red";
@@ -737,6 +750,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
                 })
                 .catch((err) => {
+                    // Yakalama tutmadıysa (site ne window.open ne form kullanıyor)
+                    // bu siteyi eski yönteme devret. En kötü ihtimalle bugünkü davranış.
+                    if (err.captureTimeout && !captureDisabled) {
+                        captureDisabled = true;
+                        log("Sessiz yakalama tutmadı, klasik yönteme geçiliyor.");
+                        window.postMessage({ type: "MINER_DISABLE_CAPTURE" }, window.location.origin);
+                        downloadLog.push(`[${timestamp}] ! Sessiz yakalama tutmadı -> klasik tıklama yöntemine geçildi`);
+                        handleClickItem(el, docType, timestamp, currentNum);
+                        return;
+                    }
                     recordResult(false, err.message, docType, timestamp, currentNum);
                     el.style.border = "3px solid red";
                     scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);

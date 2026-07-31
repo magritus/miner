@@ -32,6 +32,29 @@
 
     // Sayfa JS'i acilan pencerenin referansini kullanabilir (ornegin .focus()).
     // Pencereyi actirmadigimiz icin cagrilari yutan zararsiz bir taklit donduruyoruz.
+    // Yakalanan istegi content script'e bildir
+    function istekYakalandi(detay) {
+        window.dispatchEvent(new CustomEvent('minerUrlCaptured', { detail: detay }));
+    }
+
+    // Form gonderimini istege cevir (SGK tarzi: target="_blank" ile POST)
+    function formuYakala(form) {
+        try {
+            const alanlar = new URLSearchParams();
+            for (const [k, v] of new FormData(form).entries()) {
+                if (typeof v === 'string') alanlar.set(k, v);
+            }
+            istekYakalandi({
+                url: form.action,
+                method: (form.method || 'GET').toUpperCase(),
+                body: alanlar.toString()
+            });
+        } catch (e) {
+            console.error("[Miner Inject] Form yakalanamadi:", e);
+            istekYakalandi({ url: null });
+        }
+    }
+
     function sahtePencere() {
         const bos = function () { };
         return {
@@ -151,12 +174,19 @@
         // o sessizce fetch etsin. Pencere yaratilmadigi icin odak da calinmaz.
         if (window.__minerCaptureEnabled) {
             try {
-                const mutlak = new URL(String(url), document.baseURI).href;
+                // about:blank ile acilan pencere genelde sonradan form hedefi olur;
+                // gercek istek o formun submit'inde gelir, burada bildirme.
+                const ham = String(url || '');
+                if (!ham || ham === 'about:blank') {
+                    console.log("[Miner Inject] about:blank penceresi engellendi, form bekleniyor");
+                    return sahtePencere();
+                }
+                const mutlak = new URL(ham, document.baseURI).href;
                 console.log("[Miner Inject] URL yakalandi, pencere acilmadi:", mutlak);
-                window.dispatchEvent(new CustomEvent('minerUrlCaptured', { detail: { url: mutlak } }));
+                istekYakalandi({ url: mutlak, method: 'GET' });
             } catch (e) {
                 console.error("[Miner Inject] URL yakalanamadi:", e);
-                window.dispatchEvent(new CustomEvent('minerUrlCaptured', { detail: { url: null } }));
+                istekYakalandi({ url: null });
             }
             return sahtePencere();
         }
@@ -169,5 +199,26 @@
         return newWin;
     };
 
-    console.log("[Miner Inject] Setup complete - XHR, Fetch, Blob, window.open intercepts ready!");
+    // ============ FORM SUBMIT INTERCEPT (yakalama modunda) ============
+    // SGK/E-Beyanname tarzi siteler PDF'i target="_blank" form POST'u ile aciyor.
+    // Yakalama modunda formu GONDERMIYORUZ; istegi content script fetch ediyor.
+    const origFormSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function () {
+        if (window.__minerCaptureEnabled) {
+            console.log("[Miner Inject] form.submit() yakalandi, gonderilmedi:", this.action);
+            formuYakala(this);
+            return;
+        }
+        return origFormSubmit.apply(this, arguments);
+    };
+
+    document.addEventListener('submit', function (e) {
+        if (!window.__minerCaptureEnabled) return;
+        console.log("[Miner Inject] submit olayi yakalandi, engellendi:", e.target && e.target.action);
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        formuYakala(e.target);
+    }, true);
+
+    console.log("[Miner Inject] Setup complete - window.open + form submit yakalama hazir!");
 })();
