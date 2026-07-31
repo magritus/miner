@@ -24,6 +24,9 @@
         } else if (event.data?.type === 'MINER_ENABLE_CAPTURE') {
             window.__minerCaptureEnabled = true;
             console.log("[Miner Inject] Capture mode ENABLED");
+            // Content script bunu BEKLIYOR. Onaylamazsak ilk tiklama yakalama
+            // acilmadan gerceklesir (postMessage asenkron) ve yakalama hep kacar.
+            window.postMessage({ type: 'MINER_CAPTURE_READY' }, window.location.origin);
         } else if (event.data?.type === 'MINER_DISABLE_CAPTURE') {
             window.__minerCaptureEnabled = false;
             console.log("[Miner Inject] Capture mode DISABLED");

@@ -118,11 +118,43 @@ const SITE_CONFIGS = {
     // E-Beyanname Portalı
     ebeyanname: {
         name: "E-Beyanname Portal",
-        // GİB ile aynı VEDOP kalıbı: beyannameGoruntule() adresi TOKEN + beyannameOid
-        // ile tıklama anında kuruyor ve callMenuUrlPopUp ile açıyor. Dışarıdan
-        // kuramayız; window.open'ı yakalayıp pencereyi açtırmadan adresi alıyoruz.
-        // Yakalama tutmazsa otomatik olarak eski tıklama yöntemine düşülür.
+        // Adresi kendimiz kurabiliyoruz -> hiç tıklamaya gerek yok (SGK gibi).
+        // Sayfanın kendi kodu:
+        //   getTOKEN()            -> document.getElementById('TOKEN').value
+        //   beyannameGoruntule(oid) -> dispatch?cmd=IMAJ&subcmd=BEYANNAMEGORUNTULE
+        //                              &TOKEN=..&beyannameOid=..&inline=true
+        // TOKEN DOM'da bir elemanda durduğu için content script doğrudan okuyabiliyor.
+        // Kuramazsak (token yok / onclick tanınmadı) null döner ve yakalama/tıklama
+        // yoluna düşülür - bu yüzden captureOnClick yedek olarak açık kalıyor.
         captureOnClick: true,
+        buildRequest: (element) => {
+            try {
+                const token = document.getElementById('TOKEN');
+                if (!token || !token.value) return null;
+
+                const onclick = element.getAttribute('onclick') || '';
+                // beyannameGoruntule('12mrzek7co1614',false,false)
+                const m = onclick.match(/beyannameGoruntule\(\s*'([^']+)'\s*,\s*(true|false)\s*,/);
+                if (!m) return null;
+
+                // Arşivden görüntüleme parametresini bilmiyoruz; sadece normal
+                // (arşiv dışı) satırlarda güvenli davranıp diğerlerini yedeğe bırakıyoruz.
+                if (m[2] !== 'false') return null;
+
+                const url = new URL(
+                    'dispatch?cmd=IMAJ&subcmd=BEYANNAMEGORUNTULE'
+                    + '&TOKEN=' + encodeURIComponent(token.value)
+                    + '&beyannameOid=' + encodeURIComponent(m[1])
+                    + '&inline=true',
+                    document.baseURI
+                ).href;
+
+                return { url: url, method: 'GET' };
+            } catch (e) {
+                console.error("[Miner] ebeyanname buildRequest error:", e);
+                return null;
+            }
+        },
         match: () => document.querySelector('img[src*="pdf_b.gif"]') || document.querySelector('img[src*="pdf_t.gif"]'),
         getTargets: () => {
             // Satır bazlı sıralama: Her şirket için önce beyanname sonra tahakkuk
@@ -292,6 +324,38 @@ function saveFileViaBackground(payload) {
         } catch (e) {
             resolve({ ok: false, error: e.message });
         }
+    });
+}
+
+// Yakalama modunu aç ve inject.js'in ONAYINI bekle.
+// postMessage asenkron olduğu için onay beklemezsek ilk tıklama yakalama
+// açılmadan gerçekleşir, kaçar ve yakalama kalıcı olarak devre dışı kalır.
+// false dönerse inject.js sayfaya ulaşmamış demektir (CSP / eski Chrome / vs).
+function enableCaptureMode(timeoutMs) {
+    return new Promise((resolve) => {
+        let bitti = false;
+        let zamanlayici = null;
+
+        function onayGeldi(e) {
+            if (e.source !== window) return;
+            if (!e.data || e.data.type !== 'MINER_CAPTURE_READY') return;
+            if (bitti) return;
+            bitti = true;
+            window.removeEventListener('message', onayGeldi);
+            clearTimeout(zamanlayici);
+            resolve(true);
+        }
+
+        window.addEventListener('message', onayGeldi);
+
+        zamanlayici = setTimeout(() => {
+            if (bitti) return;
+            bitti = true;
+            window.removeEventListener('message', onayGeldi);
+            resolve(false);
+        }, timeoutMs);
+
+        window.postMessage({ type: "MINER_ENABLE_CAPTURE" }, window.location.origin);
     });
 }
 
@@ -526,11 +590,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let slowMode = false;
         let captureDisabled = false;   // yakalama tutmazsa eski yönteme kalıcı geçiş
 
-        // GİB gibi adresi tıklama anında üreten siteler: inject.js window.open'ı
-        // yakalasın, pencere açılmasın. Sadece bu modda gerekli.
-        if (config.captureOnClick) {
-            window.postMessage({ type: "MINER_ENABLE_CAPTURE" }, window.location.origin);
-        }
+        // NOT: Yakalama modu processNext()'ten ÖNCE açılıp ONAYLANMALI.
+        // Başlatma en aşağıda, startDownload() içinde yapılıyor.
 
         // Site'e özel bekleme süreleri (ms)
         const isEbeyanname = config.name === "E-Beyanname Portal";
@@ -843,7 +904,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         }
 
-        processNext();
+        // Yakalama gerekiyorsa ONAY gelmeden ilk tıklamayı yapma.
+        // Onay gelmezse inject.js sayfaya ulaşmamıştır; bunu sessizce geçmek
+        // yerine log'a yazıp klasik yönteme geçiyoruz.
+        function startDownload() {
+            if (!config.captureOnClick) {
+                processNext();
+                return;
+            }
+            enableCaptureMode(2000).then((hazir) => {
+                if (!hazir) {
+                    captureDisabled = true;
+                    log("inject.js sayfaya ulaşmadı - klasik tıklama yöntemi kullanılacak");
+                    downloadLog.push(`[${getTimestamp()}] ! inject.js yanıt vermedi (sayfaya yüklenmemiş) -> klasik tıklama yöntemi`);
+                    downloadLog.push(`    Cözüm: eklentiyi chrome://extensions/ üzerinden reload edip SAYFAYI da yenileyin.`);
+                } else {
+                    log("Sessiz yakalama hazır.");
+                }
+                processNext();
+            });
+        }
+
+        startDownload();
     }
 });
 
