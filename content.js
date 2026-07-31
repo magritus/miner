@@ -545,8 +545,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const selectedCount = targets.length;
         let successCount = 0;
         let failCount = 0;
+        let unverifiedCount = 0; // tıklama yolu: sonucu bilemediklerimiz
         const downloadedItems = [];
         const failedItems = [];
+        const unverifiedItems = [];
 
         // Tüm hedeflerin listesini oluştur
         const allTargetInfo = targets.map((t, i) => ({
@@ -600,8 +602,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 downloadLog.push(`Durum                 : KULLANICI TARAFINDAN DURDURULDU`);
             }
             downloadLog.push(`Bitiş Zamanı          : ${endTime}`);
-            downloadLog.push(`Başarılı İndirme      : ${successCount} / ${selectedCount}`);
+            downloadLog.push(`Doğrulanmış İndirme   : ${successCount} / ${selectedCount}`);
             downloadLog.push(`Başarısız             : ${failCount}`);
+            if (unverifiedCount > 0) {
+                downloadLog.push(`Doğrulanamayan        : ${unverifiedCount}  <-- DİKKAT`);
+                downloadLog.push(``);
+                downloadLog.push(`  Bu belgeler klasik tıklama yöntemiyle gönderildi. Tarayıcı indirmeyi`);
+                downloadLog.push(`  kendi yürüttüğü için sunucunun ne döndüğünü göremiyoruz: dosya inmemiş`);
+                downloadLog.push(`  olabilir. Klasörleri kontrol edin.`);
+            }
             if (stoppedByUser) {
                 downloadLog.push(`İşlenmeyen (durduruldu): ${selectedCount - successCount - failCount}`);
             }
@@ -610,6 +619,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             if (downloadedItems.length > 0) {
                 downloadLog.push(`✓ İNDİRİLEN DOSYALAR (${downloadedItems.length}):`);
                 downloadedItems.forEach(item => {
+                    downloadLog.push(`  • ${item}`);
+                });
+                downloadLog.push(``);
+            }
+
+            if (unverifiedItems.length > 0) {
+                downloadLog.push(`? SONUCU DOĞRULANAMAYANLAR (${unverifiedItems.length}) - klasörleri kontrol edin:`);
+                unverifiedItems.forEach(item => {
                     downloadLog.push(`  • ${item}`);
                 });
                 downloadLog.push(``);
@@ -634,9 +651,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 logContent: downloadLog.join('\n')
             });
 
+            // Doğrulanamayanları ayrı göster; "başarılı" diye yutmak yanıltıcı olur.
+            const ek = unverifiedCount > 0 ? `, ${unverifiedCount} doğrulanamadı` : '';
             const finalMessage = stoppedByUser
-                ? `Durduruldu! (${successCount}/${selectedCount} tamamlandı)`
-                : `Tamamlandı! (${successCount}/${selectedCount} başarılı)`;
+                ? `Durduruldu! (${successCount}/${selectedCount} doğrulandı${ek})`
+                : `Tamamlandı! (${successCount}/${selectedCount} doğrulandı${ek})`;
             log(finalMessage);
             safeSendMessage({ action: "updateStatus", message: finalMessage, completed: true });
         }
@@ -684,10 +703,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         }
 
-        // Sonucu rapora işle
-        function recordResult(ok, errMsg, docType, timestamp, currentNum) {
+        // Sonucu rapora işle.
+        // unverified=true -> tıklama yolu: isteği tarayıcı yürüttüğü için sunucunun
+        // ne döndüğünü BİLMİYORUZ. "Başarılı" demek yalan olur, ayrı sayıyoruz.
+        function recordResult(ok, errMsg, docType, timestamp, currentNum, unverified) {
             const itemPath = `${basePath}/${docType}/`;
-            if (ok) {
+            if (ok && unverified) {
+                unverifiedCount++;
+                unverifiedItems.push(`[${currentNum}] ${docType}`);
+                downloadLog.push(`[${timestamp}] ? ${currentNum}. ${docType} -> ${itemPath} (gönderildi, sonuç doğrulanamadı)`);
+            } else if (ok) {
                 successCount++;
                 downloadedItems.push(`[${currentNum}] ${docType}`);
                 downloadLog.push(`[${timestamp}] ✓ ${currentNum}. ${docType} -> ${itemPath}`);
@@ -803,7 +828,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         clickSuccess = false;
                     }
 
-                    recordResult(clickSuccess, "tıklama hatası", docType, timestamp, currentNum);
+                    // clickSuccess sadece "tıklama fırlatmadı" demek; sunucu 503 dönse
+                    // veya hiç dosya inmese bile burada göremeyiz -> doğrulanmadı say.
+                    recordResult(clickSuccess, "tıklama hatası", docType, timestamp, currentNum, true);
 
                     // Sonraki dosyaya geç
                     downloadState.timerId = setTimeout(() => {
