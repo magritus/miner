@@ -101,9 +101,16 @@ document.addEventListener('DOMContentLoaded', () => {
                         const cells = row.querySelectorAll(':scope > td');
 
                         // Firma: title attribute veya textContent
+                        // !!! content.js icindeki getDocType ile AYNI mantik olmali,
+                        // yoksa listede gorunen ile inen klasor farkli olur.
                         let firma = "Firma";
                         if (cells[3]) {
-                            firma = (cells[3].getAttribute('title') || cells[3].textContent.trim()).substring(0, 30);
+                            const ft = (cells[3].getAttribute('title') || cells[3].textContent.trim());
+                            if (ft && ft.length > 0) firma = ft.substring(0, 50);
+                        }
+                        if (firma === "Firma") {
+                            const vkn = cells[2] ? cells[2].textContent.trim() : '';
+                            firma = vkn ? `VKN_${vkn}` : 'Bilinmeyen_Firma';
                         }
 
                         // Beyanname türü

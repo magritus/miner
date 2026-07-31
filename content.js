@@ -188,6 +188,17 @@ const SITE_CONFIGS = {
                         }
                     }
 
+                    // Firma adı okunamadıysa VKN/TCKN'ye düş (sütun 2).
+                    // Aksi halde TÜM farklı firmalar tek bir "Firma" klasörüne yığılıyor
+                    // ve hangi belgenin kime ait olduğu kayboluyor.
+                    if (firma === "Firma") {
+                        const vkn = cells[2] ? cells[2].textContent.trim().replace(/[\\/:*?"<>|]/g, '_') : '';
+                        firma = vkn ? `VKN_${vkn}` : 'Bilinmeyen_Firma';
+                        console.warn("[Miner] Firma adı okunamadı, klasör:", firma,
+                            "| satır hücre sayısı:", cells.length,
+                            "| tür:", cells[1] ? cells[1].textContent.trim() : '?');
+                    }
+
                     // Sütun 5: Vergilendirme dönemi - "09/2025-09/2025" formatı
                     // İlk kısmı al: "09/2025"
                     if (cells[5]) {
