@@ -147,6 +147,31 @@ arızasıdır, eklentiyle ilgisi yoktur — rapor bunları artık açıkça yaza
 - Ek sunucu/servis yok; her şey tarayıcıda, mevcut oturumunuzla çalışır
 - Tasarım notları: [`docs/superpowers/specs/`](docs/superpowers/specs/)
 
+### Testler
+
+```bash
+bash tests/run-all.sh
+```
+
+Sözdizimi, `manifest.json` geçerliliği ve mantık testlerini çalıştırır. Node.js dışında
+bağımlılık yok.
+
+| Test | Ne doğrular |
+|---|---|
+| `test-logic.js` | SGK `onclick` ayrıştırma, `Content-Disposition` dosya adı (Türkçe/UTF-8 dahil), dosya adı temizleme |
+| `test-selectors.js` | `content.js` ve `popup.js` içindeki SGK seçicilerinin **birebir aynı** olması |
+| `test-ebeyanname.js` | E-Beyanname beyanname/tahakkuk adres kurma ve yedeğe düşme kuralları |
+
+Testler regex ve fonksiyonları **kaynak dosyalardan çekerek** çalışır — kopya tutmaz,
+yani kod değişince test de onunla değişir.
+
+`test-selectors.js` özellikle önemli: popup listeyi kendi seçicisiyle kurar, seçilen
+**indeksler** content script'e gider. İki seçici ayrışırsa indeksler kayar ve
+**yanlış belgeler iner** — üstelik sessizce, hata vermeden. Bu test o riski kapatır.
+
+Test verileri canlı portallardan alınmış gerçek `onclick` örnekleridir (referans
+numaraları örnek değerlerle değiştirilmiştir).
+
 ---
 
 ## Yasal uyarı
