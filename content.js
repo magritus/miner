@@ -133,22 +133,27 @@ const SITE_CONFIGS = {
                 if (!token || !token.value) return null;
 
                 const onclick = element.getAttribute('onclick') || '';
-                // beyannameGoruntule('12mrzek7co1614',false,false)
-                const m = onclick.match(/beyannameGoruntule\(\s*'([^']+)'\s*,\s*(true|false)\s*,/);
-                if (!m) return null;
+                const tokenParam = '&TOKEN=' + encodeURIComponent(token.value);
+                let params = null;
 
-                // Arşivden görüntüleme parametresini bilmiyoruz; sadece normal
-                // (arşiv dışı) satırlarda güvenli davranıp diğerlerini yedeğe bırakıyoruz.
-                if (m[2] !== 'false') return null;
+                // beyannameGoruntule(oid, arsivdenGoruntule, asAttachment)
+                let m = onclick.match(/beyannameGoruntule\(\s*'([^']+)'\s*,\s*(true|false)\s*,/);
+                if (m) {
+                    // Arşiv kalıbını (getParameterForArsiv) bilmiyoruz -> yedeğe bırak
+                    if (m[2] !== 'false') return null;
+                    params = 'cmd=IMAJ&subcmd=BEYANNAMEGORUNTULE' + tokenParam
+                        + '&beyannameOid=' + encodeURIComponent(m[1]);
+                } else {
+                    // tahakkukGoruntule(oid, tahakkukOid, arsivdenGoruntule, asAttachment)
+                    m = onclick.match(/tahakkukGoruntule\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*(true|false)\s*,/);
+                    if (!m) return null;
+                    if (m[3] !== 'false') return null;
+                    params = 'cmd=IMAJ&subcmd=TAHAKKUKGORUNTULE' + tokenParam
+                        + '&beyannameOid=' + encodeURIComponent(m[1])
+                        + '&tahakkukOid=' + encodeURIComponent(m[2]);
+                }
 
-                const url = new URL(
-                    'dispatch?cmd=IMAJ&subcmd=BEYANNAMEGORUNTULE'
-                    + '&TOKEN=' + encodeURIComponent(token.value)
-                    + '&beyannameOid=' + encodeURIComponent(m[1])
-                    + '&inline=true',
-                    document.baseURI
-                ).href;
-
+                const url = new URL('dispatch?' + params + '&inline=true', document.baseURI).href;
                 return { url: url, method: 'GET' };
             } catch (e) {
                 console.error("[Miner] ebeyanname buildRequest error:", e);
