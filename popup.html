@@ -57,9 +57,15 @@
   <div class="status" id="status">Scanning...</div>
 
   <div style="margin: 10px 0;">
-    <label for="basePath" style="display:block; font-size:12px; font-weight:bold;">Base Folder (inside
-      Downloads):</label>
+    <label for="basePath" style="display:block; font-size:12px; font-weight:bold;">Base Folder (inside Downloads):</label>
     <input type="text" id="basePath" value="MinerDownloads" style="width: 100%; box-sizing: border-box; padding: 5px;">
+  </div>
+
+  <div style="margin: 6px 0;">
+    <label style="font-size:11px; cursor:pointer; display:flex; align-items:center; gap:4px;">
+      <input type="checkbox" id="skipExisting" checked>
+      <span>Zaten indirilenleri atla (Mükerrer Engelle)</span>
+    </label>
   </div>
 
   <div id="list"></div>

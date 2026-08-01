@@ -243,6 +243,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Handle download click
     downloadBtn.addEventListener('click', () => {
         const basePath = basePathInput.value || "MinerDownloads";
+        const skipExistingCb = document.getElementById('skipExisting');
+        const skipExisting = skipExistingCb ? skipExistingCb.checked : true;
+
         chrome.storage.local.set({ basePath: basePath });
 
         // Get selected indices
@@ -263,6 +266,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 action: "download",
                 delay: 2000,
                 basePath: basePath,
+                skipExisting: skipExisting,
                 indices: selectedIndices // Send specific indices
             }, { frameId: targetFrameId }, (response) => {
                 // Content script "started" dediyse indirme BASLADI -> asla tekrar gonderme.
@@ -295,6 +299,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 action: "download",
                                 delay: 2000,
                                 basePath: basePath,
+                                skipExisting: skipExisting,
                                 indices: selectedIndices
                             });
                         }, 500);

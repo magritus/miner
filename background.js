@@ -62,11 +62,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ ok: false, error: chrome.runtime.lastError.message });
             } else {
                 console.log("[Miner BG] Kaydedildi:", path);
+                chrome.storage.local.get(['saved_files'], (res) => {
+                    const saved = res.saved_files || {};
+                    saved[path] = { timestamp: Date.now() };
+                    chrome.storage.local.set({ saved_files: saved });
+                });
                 sendResponse({ ok: true, downloadId: downloadId });
             }
         });
 
         return true; // sendResponse asenkron çağrılacak, kanalı açık tut
+    }
+
+    // İndirilmiş dosyaların varlığını kontrol et (mükerrer indirmeyi engellemek için)
+    if (request.action === "checkExistingFiles") {
+        const basePath = request.basePath || "MinerDownloads";
+        chrome.downloads.search({ state: 'complete' }, (items) => {
+            chrome.storage.local.get(['saved_files'], (storageRes) => {
+                const savedFromStorage = storageRes.saved_files || {};
+                const existingMap = {};
+
+                for (const key in savedFromStorage) {
+                    if (key.startsWith(basePath + '/') || key.includes('/' + basePath + '/')) {
+                        existingMap[key] = true;
+                    }
+                }
+
+                if (items && Array.isArray(items)) {
+                    items.forEach(item => {
+                        if (item.filename) {
+                            const normalized = item.filename.replace(/\\/g, '/');
+                            const idx = normalized.indexOf(basePath + '/');
+                            if (idx !== -1) {
+                                const relPath = normalized.substring(idx);
+                                existingMap[relPath] = true;
+                            }
+                        }
+                    });
+                }
+
+                sendResponse({ existingMap: existingMap });
+            });
+        });
+        return true;
     }
 
     if (request.action === "setNextDownloadConfig") {

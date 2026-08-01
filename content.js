@@ -425,7 +425,7 @@ function captureRequestFromClick(el, timeoutMs) {
     });
 }
 
-// PDF'i belleğe indir ve diske yaz. { ok, error, status } döner.
+// PDF'i belleğe indir ve diske yaz. { ok, error, status, isHtmlError } döner.
 async function fetchPdfAndSave(req, basePath, folder, fallbackName) {
     let resp;
     try {
@@ -454,7 +454,26 @@ async function fetchPdfAndSave(req, basePath, folder, fallbackName) {
 
     // Hata sayfaları HTML döner; PDF beklerken HTML geldiyse bu bir başarısızlıktır
     if (!contentType.includes('pdf') && !contentType.includes('octet-stream')) {
-        return { ok: false, error: `PDF değil (${contentType || 'tip yok'})` };
+        let htmlSnippet = '';
+        try {
+            const text = await blob.text();
+            const titleMatch = text.match(/<title>(.*?)<\/title>/i);
+            if (titleMatch && titleMatch[1]) {
+                htmlSnippet = titleMatch[1].trim();
+            } else {
+                const cleanText = text.replace(/<script[\s\S]*?<\/script>/gi, '')
+                                      .replace(/<style[\s\S]*?<\/style>/gi, '')
+                                      .replace(/<[^>]+>/g, ' ')
+                                      .replace(/\s+/g, ' ')
+                                      .trim();
+                if (cleanText.length > 0) {
+                    htmlSnippet = cleanText.substring(0, 60);
+                }
+            }
+        } catch (e) { }
+
+        const detail = htmlSnippet ? htmlSnippet : (contentType || 'tip yok');
+        return { ok: false, error: `PDF değil (${detail})`, isHtmlError: true, status: resp.status };
     }
     if (blob.size < 1000) {
         return { ok: false, error: `Dosya çok küçük (${blob.size} byte)` };
@@ -476,6 +495,25 @@ async function fetchPdfAndSave(req, basePath, folder, fallbackName) {
     return { ok: true };
 }
 
+// Sunucu yoğunluğunda (HTML hatası, HTTP 503/429) otomatik yeniden deneme (retry) yapan sarmalayıcı
+async function fetchPdfWithRetry(req, basePath, folder, fallbackName, maxRetries = 2) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const result = await fetchPdfAndSave(req, basePath, folder, fallbackName);
+        if (result.ok) {
+            return result;
+        }
+
+        // Eğer 5xx sunucu hatası (500, 502, 503 vb.), 429 veya HTML hatası ise bekleyip tekrar dene
+        const isTemporaryError = result.isHtmlError || (result.status && result.status >= 500) || result.status === 429;
+        if (attempt < maxRetries && isTemporaryError) {
+            log(`Geçici yanıt alındı (${result.error}), ${attempt + 1}/${maxRetries} yeniden deneniyor...`);
+            await new Promise(resolve => setTimeout(resolve, 3500));
+        } else {
+            return result;
+        }
+    }
+}
+
 // İndirme döngüsünün durumu (stop butonu bunu okuyup değiştirir)
 const downloadState = {
     active: false,
@@ -483,10 +521,7 @@ const downloadState = {
     timerId: null
 };
 
-// ============ SAYFA İÇİ DURDUR BUTONU ============
-// Popup, indirme sırasında pencere/sekme odağı değiştiği an Chrome tarafından
-// otomatik kapatılabiliyor (bu yüzden butonu görmeye fırsat kalmıyordu).
-// Bu yüzden Durdur butonunu popup yerine sayfanın kendisine, kalıcı olarak koyuyoruz.
+// ============ SAYFA İÇİ İLERLEME & BİLGİ PANELİ (OVERLAY) ============
 const STOP_OVERLAY_ID = "miner-stop-overlay";
 
 function requestStop() {
@@ -500,27 +535,173 @@ function requestStop() {
     }
 }
 
-function showStopOverlay() {
-    if (document.getElementById(STOP_OVERLAY_ID)) return;
-    const btn = document.createElement("button");
-    btn.id = STOP_OVERLAY_ID;
-    btn.textContent = "⏹ Miner'ı Durdur";
-    btn.style.cssText = "position:fixed; top:16px; right:16px; z-index:2147483647; " +
-        "background:#e53935; color:#fff; border:none; border-radius:6px; " +
-        "padding:12px 20px; font-size:14px; font-weight:bold; cursor:pointer; " +
-        "box-shadow:0 2px 10px rgba(0,0,0,0.4); font-family:sans-serif;";
-    btn.addEventListener("click", () => {
-        requestStop();
-        btn.textContent = "Durduruluyor...";
-        btn.disabled = true;
-        btn.style.opacity = "0.6";
-    });
-    (document.body || document.documentElement).appendChild(btn);
+function showStopOverlay(totalCount = 0) {
+    let overlay = document.getElementById(STOP_OVERLAY_ID);
+    if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.id = STOP_OVERLAY_ID;
+        overlay.style.cssText = `
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 2147483647;
+            width: 330px;
+            background: #0f172a;
+            color: #f8fafc;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+            padding: 14px 16px;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 13px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            backdrop-filter: blur(8px);
+            box-sizing: border-box;
+        `;
+        (document.body || document.documentElement).appendChild(overlay);
+    }
+
+    overlay.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span id="miner-overlay-spinner" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#10b981; box-shadow:0 0 8px #10b981;"></span>
+                <strong id="miner-overlay-title" style="font-size:14px; color:#f1f5f9; font-weight:600;">⚡ Miner İndirme</strong>
+            </div>
+            <button id="miner-overlay-stop-btn" style="
+                background:#ef4444; color:#ffffff; border:none; border-radius:6px;
+                padding:6px 12px; font-size:12px; font-weight:600; cursor:pointer;
+                transition:all 0.2s ease; display:flex; align-items:center; gap:4px;
+            ">⏹ Durdur</button>
+        </div>
+
+        <div style="margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; font-size:12px; color:#94a3b8; margin-bottom:4px;">
+                <span id="miner-overlay-status-title">Hazırlanıyor...</span>
+                <span id="miner-overlay-percent" style="font-weight:600; color:#38bdf8;">0% (0/${totalCount})</span>
+            </div>
+            <div style="width:100%; height:8px; background:#1e293b; border-radius:4px; overflow:hidden;">
+                <div id="miner-overlay-bar" style="width:0%; height:100%; background:linear-gradient(90deg, #3b82f6, #10b981); border-radius:4px; transition:width 0.3s ease;"></div>
+            </div>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:3px; margin-bottom:8px; font-size:10px;">
+            <span style="background:rgba(16, 185, 129, 0.15); color:#34d399; padding:3px 6px; border-radius:5px; border:1px solid rgba(52, 211, 153, 0.3);" id="miner-badge-success">✓ 0 İndi</span>
+            <span style="background:rgba(59, 130, 246, 0.15); color:#60a5fa; padding:3px 6px; border-radius:5px; border:1px solid rgba(96, 165, 250, 0.3);" id="miner-badge-skipped">⏩ 0 Atlandı</span>
+            <span style="background:rgba(239, 68, 68, 0.15); color:#f87171; padding:3px 6px; border-radius:5px; border:1px solid rgba(248, 113, 113, 0.3);" id="miner-badge-fail">✗ 0 Hata</span>
+            <span style="background:rgba(148, 163, 184, 0.15); color:#cbd5e1; padding:3px 6px; border-radius:5px; border:1px solid rgba(203, 213, 225, 0.3);" id="miner-badge-remaining">⌛ ${totalCount} Kalan</span>
+        </div>
+
+        <div id="miner-overlay-log" style="
+            background:#020617; color:#94a3b8; border-radius:6px; padding:6px 8px;
+            font-size:11px; font-family:monospace; height:42px; overflow-y:auto;
+            border:1px solid rgba(255,255,255,0.05); line-height:1.4; word-break:break-all;
+            margin-bottom:6px;
+        ">İndirme başlatılıyor...</div>
+
+        <div id="miner-overlay-actions" style="display:flex; gap:6px; justify-content:flex-end;"></div>
+    `;
+
+    const stopBtn = document.getElementById("miner-overlay-stop-btn");
+    if (stopBtn) {
+        stopBtn.addEventListener("click", () => {
+            requestStop();
+            stopBtn.textContent = "Durduruluyor...";
+            stopBtn.disabled = true;
+            stopBtn.style.opacity = "0.6";
+        });
+    }
+}
+
+function updateOverlayProgress({ current = 0, total = 0, success = 0, skipped = 0, fail = 0, statusMsg = "" }) {
+    const overlay = document.getElementById(STOP_OVERLAY_ID);
+    if (!overlay) return;
+
+    const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+    const remaining = Math.max(0, total - current);
+
+    const barEl = document.getElementById("miner-overlay-bar");
+    const percentEl = document.getElementById("miner-overlay-percent");
+    const statusTitle = document.getElementById("miner-overlay-status-title");
+    const successBadge = document.getElementById("miner-badge-success");
+    const skippedBadge = document.getElementById("miner-badge-skipped");
+    const failBadge = document.getElementById("miner-badge-fail");
+    const remainingBadge = document.getElementById("miner-badge-remaining");
+
+    if (barEl) barEl.style.width = `${percent}%`;
+    if (percentEl) percentEl.textContent = `${percent}% (${current}/${total})`;
+    if (statusTitle && current > 0) statusTitle.textContent = `İndiriliyor... (${current}/${total})`;
+    if (successBadge) successBadge.textContent = `✓ ${success} İndi`;
+    if (skippedBadge) skippedBadge.textContent = `⏩ ${skipped} Atlandı`;
+    if (failBadge) failBadge.textContent = `✗ ${fail} Hata`;
+    if (remainingBadge) remainingBadge.textContent = `⌛ ${remaining} Kalan`;
+
+    if (statusMsg) {
+        const logEl = document.getElementById("miner-overlay-log");
+        if (logEl) {
+            logEl.textContent = statusMsg;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+    }
+}
+
+function finishOverlayUI({ stoppedByUser, successCount, failCount, selectedCount, failedIndices, onRetry }) {
+    const overlay = document.getElementById(STOP_OVERLAY_ID);
+    if (!overlay) return;
+
+    const spinner = document.getElementById("miner-overlay-spinner");
+    if (spinner) {
+        if (stoppedByUser) {
+            spinner.style.background = "#f59e0b";
+            spinner.style.boxShadow = "0 0 8px #f59e0b";
+        } else if (failCount > 0) {
+            spinner.style.background = "#ef4444";
+            spinner.style.boxShadow = "0 0 8px #ef4444";
+        } else {
+            spinner.style.background = "#10b981";
+            spinner.style.boxShadow = "0 0 8px #10b981";
+        }
+    }
+
+    const statusTitle = document.getElementById("miner-overlay-status-title");
+    if (statusTitle) {
+        statusTitle.textContent = stoppedByUser ? "Durduruldu!" : "Tamamlandı!";
+    }
+
+    const stopBtn = document.getElementById("miner-overlay-stop-btn");
+    if (stopBtn) stopBtn.style.display = "none";
+
+    const actionsContainer = document.getElementById("miner-overlay-actions");
+    if (actionsContainer) {
+        actionsContainer.innerHTML = "";
+
+        if (failedIndices && failedIndices.length > 0 && !stoppedByUser) {
+            const retryBtn = document.createElement("button");
+            retryBtn.style.cssText = `
+                background: linear-gradient(135deg, #2563eb, #1d4ed8);
+                color: #ffffff; border: none; border-radius: 6px;
+                padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+                box-shadow: 0 2px 6px rgba(37, 99, 235, 0.4); flex: 1;
+            `;
+            retryBtn.textContent = `🔄 Eksikleri Yeniden İndir (${failedIndices.length})`;
+            retryBtn.addEventListener("click", () => {
+                if (onRetry) onRetry();
+            });
+            actionsContainer.appendChild(retryBtn);
+        }
+
+        const closeBtn = document.createElement("button");
+        closeBtn.style.cssText = `
+            background: #334155; color: #f8fafc; border: none; border-radius: 6px;
+            padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+        `;
+        closeBtn.textContent = "✕ Kapat";
+        closeBtn.addEventListener("click", () => hideStopOverlay());
+        actionsContainer.appendChild(closeBtn);
+    }
 }
 
 function hideStopOverlay() {
-    const btn = document.getElementById(STOP_OVERLAY_ID);
-    if (btn) btn.remove();
+    const overlay = document.getElementById(STOP_OVERLAY_ID);
+    if (overlay) overlay.remove();
 }
 
 // inject.js'i main world'e enjekte et (window.open intercept için).
@@ -536,57 +717,68 @@ function injectMainWorldScript() {
 }
 injectMainWorldScript();
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "scan") {
-        const targets = getTargets();
-        const items = targets.map(t => ({ title: t.title, type: findDocType(t) }));
-        sendResponse({ count: targets.length, items: items });
+function hasMatchingExistingFile(existingMap, basePath, docType, fileType, fallbackName) {
+    if (!existingMap) return false;
+
+    if (fallbackName) {
+        const exactPath = `${basePath}/${docType}/${fallbackName}`.replace(/\/+/g, '/').toLowerCase();
+        if (existingMap[exactPath]) return true;
     }
-    else if (request.action === "stop") {
-        requestStop();
-        sendResponse({ stopped: true });
+
+    const folderPrefix = `${basePath}/${docType}/`.replace(/\/+/g, '/').toLowerCase();
+    for (const rawPath in existingMap) {
+        const path = rawPath.toLowerCase();
+        if (path.includes(folderPrefix)) {
+            if (fileType && fileType !== "Belge" && fileType !== "Beyanname") {
+                if (path.includes(fileType.toLowerCase())) return true;
+            } else if (path.endsWith('.pdf')) {
+                return true;
+            }
+        }
     }
-    else if (request.action === "download") {
-        // Zaten bir indirme sürüyorsa ikinciyi başlatma (mükerrer indirmeye karşı emniyet)
-        if (downloadState.active) {
-            console.warn("[Miner] Zaten bir indirme sürüyor, yeni istek yok sayıldı.");
-            sendResponse({ started: false, reason: "already_running" });
-            return;
-        }
+    return false;
+}
 
-        // ÖNEMLİ: Hemen yanıt ver. Yanıt vermezsek Chrome kanalı kapatıp
-        // popup'ta lastError üretir; popup bunu hata sanıp indirmeyi TEKRAR
-        // başlatır ve her dosya iki kez iner.
-        sendResponse({ started: true });
+function startDownloadProcess(request) {
+    if (downloadState.active) {
+        console.warn("[Miner] Zaten bir indirme sürüyor, yeni istek yok sayıldı.");
+        return;
+    }
 
-        log("Download başladı");
+    log("Download başladı");
 
-        const config = detectSite();
-        const allTargets = getTargets();
-        let targets = [];
-        if (request.indices && Array.isArray(request.indices)) {
-            targets = request.indices.map(i => allTargets[i]).filter(t => t !== undefined);
-        } else {
-            targets = allTargets;
-        }
+    const config = detectSite();
+    const allTargets = getTargets();
+    let targetItems = [];
 
-        log(`${targets.length} dosya indirilecek (${config.name})`);
+    if (request.indices && Array.isArray(request.indices)) {
+        targetItems = request.indices
+            .map(i => ({ element: allTargets[i], globalIndex: i }))
+            .filter(item => item.element !== undefined);
+    } else {
+        targetItems = allTargets.map((el, i) => ({ element: el, globalIndex: i }));
+    }
 
-        if (targets.length === 0) {
-            safeSendMessage({ action: "updateStatus", message: "Dosya bulunamadı!", completed: true });
-            return;
-        }
+    log(`${targetItems.length} dosya indirilecek (${config.name})`);
 
-        const basePath = request.basePath || "MinerDownloads";
+    if (targetItems.length === 0) {
+        safeSendMessage({ action: "updateStatus", message: "Dosya bulunamadı!", completed: true });
+        return;
+    }
+
+    const basePath = request.basePath || "MinerDownloads";
+    const skipExisting = request.skipExisting !== false;
+
+    // Background'dan diske inen ve indirilenler geçmişini iste
+    safeSendMessage({ action: "checkExistingFiles", basePath: basePath }, (resp) => {
+        const existingMap = (resp && resp.existingMap) ? resp.existingMap : {};
+
         let index = 0;
 
         downloadState.active = true;
         downloadState.stopRequested = false;
         downloadState.timerId = null;
 
-        // Odak koruması SADECE tıklama yoluna düşüldüğünde açılır (bkz. enableFocusGuardOnce).
-        // Fetch yolunda hiç pencere açılmadığı için korumaya gerek yok; açık kalsaydı
-        // kullanıcının kendi açtığı sekmeyi de geri çekerdi.
         let focusGuardOn = false;
         function enableFocusGuardOnce() {
             if (focusGuardOn) return;
@@ -595,44 +787,34 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             window.postMessage({ type: "MINER_ENABLE_FOCUS_GUARD" }, window.location.origin);
         }
 
-        // Sayfa içi Durdur butonunu göster (popup kapansa bile burada kalır)
-        showStopOverlay();
-
-        // Sessiz (fetch) yol için bekleme süreleri (ms).
-        // Pencere açma maliyeti olmadığı için kısa; ama sunucuyu zorlamamak için sıfır değil.
-        const FETCH_DELAY = 800;
-        const SLOW_FETCH_DELAY = 8000; // 503/429 sonrası nezaket modu
-        const CAPTURE_TIMEOUT = 5000;  // İsteğin yakalanması için bekleme süresi
-        let slowMode = false;
-        let captureDisabled = false;   // yakalama tutmazsa eski yönteme kalıcı geçiş
-
-        // NOT: Yakalama modu processNext()'ten ÖNCE açılıp ONAYLANMALI.
-        // Başlatma en aşağıda, startDownload() içinde yapılıyor.
+        // Sayfa içi İlerleme & Bilgi Panelini göster
+        showStopOverlay(targetItems.length);
 
         // Site'e özel bekleme süreleri (ms)
         const isEbeyanname = config.name === "E-Beyanname Portal";
-        const clickDelay = isEbeyanname ? 50 : 100;        // Tıklama öncesi
-        const afterClickDelay = isEbeyanname ? 200 : 1000; // Tıklama sonrası
-        const betweenDelay = isEbeyanname ? 1500 : (request.delay || 2000); // Dosyalar arası (E-Beyanname 1.5sn)
+
+        const FETCH_DELAY = isEbeyanname ? 1800 : 800;
+        const SLOW_FETCH_DELAY = 8000;
+        const CAPTURE_TIMEOUT = 5000;
+        let slowMode = false;
+        let captureDisabled = false;
+        const clickDelay = isEbeyanname ? 50 : 100;
+        const afterClickDelay = isEbeyanname ? 200 : 1000;
+        const betweenDelay = isEbeyanname ? 1500 : (request.delay || 2000);
 
         // Log kayıtları
         const downloadLog = [];
         const startTime = getTimestamp();
         const totalOnPage = allTargets.length;
-        const selectedCount = targets.length;
+        const selectedCount = targetItems.length;
         let successCount = 0;
+        let skippedCount = 0;
         let failCount = 0;
-        let unverifiedCount = 0; // tıklama yolu: sonucu bilemediklerimiz
+        let unverifiedCount = 0;
         const downloadedItems = [];
         const failedItems = [];
+        const failedTargetIndices = [];
         const unverifiedItems = [];
-
-        // Tüm hedeflerin listesini oluştur
-        const allTargetInfo = targets.map((t, i) => ({
-            index: i,
-            docType: findDocType(t),
-            status: 'bekliyor'
-        }));
 
         downloadLog.push(`════════════════════════════════════════════════════════`);
         downloadLog.push(`                  MINER İNDİRME RAPORU`);
@@ -642,6 +824,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         downloadLog.push(`Site Türü     : ${config.name}`);
         downloadLog.push(`Sayfa URL     : ${window.location.href}`);
         downloadLog.push(`Hedef Klasör  : ${basePath}`);
+        downloadLog.push(`Mükerrer Atla : ${skipExisting ? 'Evet' : 'Hayır'}`);
         downloadLog.push(``);
         downloadLog.push(`────────────────────────────────────────────────────────`);
         downloadLog.push(`                      ÖZET BİLGİLER`);
@@ -654,22 +837,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         downloadLog.push(`────────────────────────────────────────────────────────`);
 
         function finishDownload(stoppedByUser) {
-            // Uçuştaki bir istek durdurma sonrası dönerse iki kez çağrılabilir; rapor tek olsun
             if (!downloadState.active) return;
 
-            // İndirme bitti (veya durduruldu), özet raporu oluştur
             const endTime = getTimestamp();
 
             downloadState.active = false;
             downloadState.stopRequested = false;
             downloadState.timerId = null;
 
-            // Odak koruması sadece indirme sürerken açık kalmalı
             safeSendMessage({ action: "stopFocusGuard" });
             window.postMessage({ type: "MINER_DISABLE_FOCUS_GUARD" }, window.location.origin);
-            // Yakalama modu kapatılmazsa kullanıcının kendi tıkladığı linkler de açılmaz!
             window.postMessage({ type: "MINER_DISABLE_CAPTURE" }, window.location.origin);
-            hideStopOverlay();
 
             downloadLog.push(``);
             downloadLog.push(`────────────────────────────────────────────────────────`);
@@ -683,10 +861,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             downloadLog.push(`Başarısız             : ${failCount}`);
             if (unverifiedCount > 0) {
                 downloadLog.push(`Doğrulanamayan        : ${unverifiedCount}  <-- DİKKAT`);
-                downloadLog.push(``);
-                downloadLog.push(`  Bu belgeler klasik tıklama yöntemiyle gönderildi. Tarayıcı indirmeyi`);
-                downloadLog.push(`  kendi yürüttüğü için sunucunun ne döndüğünü göremiyoruz: dosya inmemiş`);
-                downloadLog.push(`  olabilir. Klasörleri kontrol edin.`);
             }
             if (stoppedByUser) {
                 downloadLog.push(`İşlenmeyen (durduruldu): ${selectedCount - successCount - failCount}`);
@@ -694,26 +868,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             downloadLog.push(``);
 
             if (downloadedItems.length > 0) {
-                downloadLog.push(`✓ İNDİRİLEN DOSYALAR (${downloadedItems.length}):`);
-                downloadedItems.forEach(item => {
-                    downloadLog.push(`  • ${item}`);
-                });
-                downloadLog.push(``);
-            }
-
-            if (unverifiedItems.length > 0) {
-                downloadLog.push(`? SONUCU DOĞRULANAMAYANLAR (${unverifiedItems.length}) - klasörleri kontrol edin:`);
-                unverifiedItems.forEach(item => {
-                    downloadLog.push(`  • ${item}`);
-                });
+                downloadLog.push(`✓ İNDİRİLEN / MEVCUT DOSYALAR (${downloadedItems.length}):`);
+                downloadedItems.forEach(item => downloadLog.push(`  • ${item}`));
                 downloadLog.push(``);
             }
 
             if (failedItems.length > 0) {
                 downloadLog.push(`✗ BAŞARISIZ OLANLAR (${failedItems.length}):`);
-                failedItems.forEach(item => {
-                    downloadLog.push(`  • ${item}`);
-                });
+                failedItems.forEach(item => downloadLog.push(`  • ${item}`));
                 downloadLog.push(``);
             }
 
@@ -721,28 +883,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             downloadLog.push(`                    RAPOR SONU`);
             downloadLog.push(`════════════════════════════════════════════════════════`);
 
-            // Log dosyasını background'a gönder
             safeSendMessage({
                 action: "saveLog",
                 basePath: basePath,
                 logContent: downloadLog.join('\n')
             });
 
-            // Doğrulanamayanları ayrı göster; "başarılı" diye yutmak yanıltıcı olur.
             const ek = unverifiedCount > 0 ? `, ${unverifiedCount} doğrulanamadı` : '';
             const finalMessage = stoppedByUser
                 ? `Durduruldu! (${successCount}/${selectedCount} doğrulandı${ek})`
                 : `Tamamlandı! (${successCount}/${selectedCount} doğrulandı${ek})`;
             log(finalMessage);
             safeSendMessage({ action: "updateStatus", message: finalMessage, completed: true });
+
+            finishOverlayUI({
+                stoppedByUser,
+                successCount,
+                failCount,
+                selectedCount,
+                failedIndices: failedTargetIndices,
+                onRetry: () => {
+                    log(`Eksik olan ${failedTargetIndices.length} dosya yeniden indiriliyor...`);
+                    startDownloadProcess({ indices: failedTargetIndices, basePath: basePath, skipExisting: skipExisting });
+                }
+            });
         }
 
         function processNext() {
             if (!isExtensionContextValid()) {
-                console.warn("[Miner] Extension context invalidated, indirme durduruluyor. Sayfayı yenileyip tekrar deneyin.");
                 downloadState.active = false;
-                // Yakalama modu acik kalirsa kullanicinin kendi tikladigi linkler de
-                // acilmaz. Sayfayi bu halde birakma.
                 window.postMessage({ type: "MINER_DISABLE_CAPTURE" }, window.location.origin);
                 window.postMessage({ type: "MINER_DISABLE_FOCUS_GUARD" }, window.location.origin);
                 hideStopOverlay();
@@ -754,38 +923,57 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 return;
             }
 
-            if (index >= targets.length) {
+            if (index >= targetItems.length) {
                 finishDownload(false);
                 return;
             }
 
-            const el = targets[index];
+            const item = targetItems[index];
+            const el = item.element;
+            const globalIdx = item.globalIndex;
             const docType = findDocType(el);
             const timestamp = getTimestamp();
             const currentNum = index + 1;
 
-            log(`İndiriliyor ${currentNum}/${targets.length} (${docType})`);
+            const fileType = config.getFileType ? config.getFileType(el) : "Belge";
+            const fallbackName = `${docType}_${fileType}.pdf`;
+
+            // Mükerrer Kontrolü: Dosya diske/geçmişe önceden inmişse 50ms'de sunucuya istek atmadan atla!
+            if (skipExisting && hasMatchingExistingFile(existingMap, basePath, docType, fileType, fallbackName)) {
+                el.style.border = "3px solid #3b82f6";
+                recordResult(true, null, docType, timestamp, currentNum, false, globalIdx, true /* isSkipped */);
+                scheduleNext(50);
+                return;
+            }
+
+            updateOverlayProgress({
+                current: currentNum,
+                total: selectedCount,
+                success: successCount,
+                fail: failCount,
+                statusMsg: `[${currentNum}/${selectedCount}] İndiriliyor: ${docType}`
+            });
 
             el.style.border = "3px solid green";
 
-            // Site için sessiz indirme tarifi var mı? Varsa hiç tıklamıyoruz.
             const req = config.buildRequest ? config.buildRequest(el) : null;
 
             if (req) {
-                handleFetchItem(req, el, docType, timestamp, currentNum);
+                handleFetchItem(req, el, docType, timestamp, currentNum, globalIdx);
             } else if (config.captureOnClick && !captureDisabled) {
-                handleCaptureItem(el, docType, timestamp, currentNum);
+                handleCaptureItem(el, docType, timestamp, currentNum, globalIdx);
             } else {
-                handleClickItem(el, docType, timestamp, currentNum);
+                handleClickItem(el, docType, timestamp, currentNum, globalIdx);
             }
         }
 
-        // Sonucu rapora işle.
-        // unverified=true -> tıklama yolu: isteği tarayıcı yürüttüğü için sunucunun
-        // ne döndüğünü BİLMİYORUZ. "Başarılı" demek yalan olur, ayrı sayıyoruz.
-        function recordResult(ok, errMsg, docType, timestamp, currentNum, unverified) {
+        function recordResult(ok, errMsg, docType, timestamp, currentNum, unverified, globalIdx, isSkipped) {
             const itemPath = `${basePath}/${docType}/`;
-            if (ok && unverified) {
+            if (isSkipped) {
+                skippedCount++;
+                downloadedItems.push(`[${currentNum}] ${docType} (zaten var, atlandı)`);
+                downloadLog.push(`[${timestamp}] ⏩ ${currentNum}. ${docType} -> ZATEN VAR (Atlandı)`);
+            } else if (ok && unverified) {
                 unverifiedCount++;
                 unverifiedItems.push(`[${currentNum}] ${docType}`);
                 downloadLog.push(`[${timestamp}] ? ${currentNum}. ${docType} -> ${itemPath} (gönderildi, sonuç doğrulanamadı)`);
@@ -795,9 +983,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 downloadLog.push(`[${timestamp}] ✓ ${currentNum}. ${docType} -> ${itemPath}`);
             } else {
                 failCount++;
+                if (globalIdx !== undefined) {
+                    failedTargetIndices.push(globalIdx);
+                }
                 failedItems.push(`[${currentNum}] ${docType} (${errMsg || 'hata'})`);
                 downloadLog.push(`[${timestamp}] ✗ ${currentNum}. ${docType} -> HATA: ${errMsg || 'bilinmiyor'}`);
             }
+
+            updateOverlayProgress({
+                current: currentNum,
+                total: selectedCount,
+                success: successCount,
+                skipped: skippedCount,
+                fail: failCount,
+                statusMsg: isSkipped ? `⏩ Zaten var (Atlandı): ${docType}` : (ok ? `✓ İndi: ${docType}` : `✗ HATA: ${docType} (${errMsg || 'hata'})`)
+            });
         }
 
         function scheduleNext(delay) {
@@ -809,19 +1009,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             downloadState.timerId = setTimeout(processNext, delay);
         }
 
-        // ---- Sessiz yol: isteği kendimiz gönder, pencere açılmaz ----
-        function handleFetchItem(req, el, docType, timestamp, currentNum) {
+        function handleFetchItem(req, el, docType, timestamp, currentNum, globalIdx) {
             const fileType = config.getFileType ? config.getFileType(el) : "Belge";
             const fallbackName = `${docType}_${fileType}.pdf`;
 
-            fetchPdfAndSave(req, basePath, docType, fallbackName)
+            fetchPdfWithRetry(req, basePath, docType, fallbackName)
                 .then((result) => {
-                    recordResult(result.ok, result.error, docType, timestamp, currentNum);
+                    recordResult(result.ok, result.error, docType, timestamp, currentNum, false, globalIdx);
                     el.style.border = result.ok ? "" : "3px solid red";
 
-                    // Sunucu zorlanıyorsa yavaşla, düzelirse normale dön
-                    if (result.status === 503 || result.status === 429) {
-                        if (!slowMode) log("Sunucu yoğun (503/429), tempo düşürülüyor...");
+                    const isServerError = result.isHtmlError || (result.status && result.status >= 500) || result.status === 429;
+                    if (isServerError) {
+                        if (!slowMode) log("Sunucu hatası/yoğunluğu (HTTP 500/503/429/HTML), tempo düşürülüyor...");
                         slowMode = true;
                     } else if (result.ok) {
                         slowMode = false;
@@ -830,25 +1029,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
                 })
                 .catch((err) => {
-                    recordResult(false, err.message, docType, timestamp, currentNum);
+                    recordResult(false, err.message, docType, timestamp, currentNum, false, globalIdx);
                     el.style.border = "3px solid red";
                     scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
                 });
         }
 
-        // ---- Sessiz yol 2 (GİB): tıkla ama pencereyi açtırma, isteği yakala ----
-        function handleCaptureItem(el, docType, timestamp, currentNum) {
+        function handleCaptureItem(el, docType, timestamp, currentNum, globalIdx) {
             const fileType = config.getFileType ? config.getFileType(el) : "Beyanname";
             const fallbackName = `${docType}_${fileType}_${currentNum}.pdf`;
 
             captureRequestFromClick(el, CAPTURE_TIMEOUT)
-                .then((req) => fetchPdfAndSave(req, basePath, docType, fallbackName))
+                .then((req) => fetchPdfWithRetry(req, basePath, docType, fallbackName))
                 .then((result) => {
-                    recordResult(result.ok, result.error, docType, timestamp, currentNum);
+                    recordResult(result.ok, result.error, docType, timestamp, currentNum, false, globalIdx);
                     el.style.border = result.ok ? "" : "3px solid red";
 
-                    if (result.status === 503 || result.status === 429) {
-                        if (!slowMode) log("Sunucu yoğun (503/429), tempo düşürülüyor...");
+                    const isServerError = result.isHtmlError || (result.status && result.status >= 500) || result.status === 429;
+                    if (isServerError) {
+                        if (!slowMode) log("Sunucu hatası/yoğunluğu (HTTP 500/503/429/HTML), tempo düşürülüyor...");
                         slowMode = true;
                     } else if (result.ok) {
                         slowMode = false;
@@ -857,39 +1056,32 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
                 })
                 .catch((err) => {
-                    // Yakalama tutmadıysa (site ne window.open ne form kullanıyor)
-                    // bu siteyi eski yönteme devret. En kötü ihtimalle bugünkü davranış.
                     if (err.captureTimeout && !captureDisabled) {
                         captureDisabled = true;
                         log("Sessiz yakalama tutmadı, klasik yönteme geçiliyor.");
                         window.postMessage({ type: "MINER_DISABLE_CAPTURE" }, window.location.origin);
                         downloadLog.push(`[${timestamp}] ! Sessiz yakalama tutmadı -> klasik tıklama yöntemine geçildi`);
-                        handleClickItem(el, docType, timestamp, currentNum);
+                        handleClickItem(el, docType, timestamp, currentNum, globalIdx);
                         return;
                     }
-                    recordResult(false, err.message, docType, timestamp, currentNum);
+                    recordResult(false, err.message, docType, timestamp, currentNum, false, globalIdx);
                     el.style.border = "3px solid red";
                     scheduleNext(slowMode ? SLOW_FETCH_DELAY : FETCH_DELAY);
                 });
         }
 
-        // ---- Eski yol: tıklama (tarifi olmayan siteler için) ----
-        function handleClickItem(el, docType, timestamp, currentNum) {
-            enableFocusGuardOnce(); // bu yol pencere açtırıyor, koruma şimdi gerekli
+        function handleClickItem(el, docType, timestamp, currentNum, globalIdx) {
+            enableFocusGuardOnce();
 
             safeSendMessage({
                 action: "setNextDownloadConfig",
-                config: {
-                    basePath: basePath,
-                    folder: docType
-                }
+                config: { basePath: basePath, folder: docType }
             }, () => {
                 if (downloadState.stopRequested) {
                     finishDownload(true);
                     return;
                 }
 
-                // Config ayarlandı, şimdi tıkla
                 downloadState.timerId = setTimeout(() => {
                     if (downloadState.stopRequested) {
                         finishDownload(true);
@@ -905,14 +1097,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         clickSuccess = false;
                     }
 
-                    // clickSuccess sadece "tıklama fırlatmadı" demek; sunucu 503 dönse
-                    // veya hiç dosya inmese bile burada göremeyiz -> doğrulanmadı say.
-                    recordResult(clickSuccess, "tıklama hatası", docType, timestamp, currentNum, true);
+                    recordResult(clickSuccess, "tıklama hatası", docType, timestamp, currentNum, true, globalIdx);
 
-                    // Sonraki dosyaya geç
                     downloadState.timerId = setTimeout(() => {
                         el.style.border = clickSuccess ? "" : "3px solid red";
-                        // Her 5 dosyada bir biraz daha bekle (E-Beyanname hariç)
                         const delay = isEbeyanname ? betweenDelay : (((index + 1) % 5 === 0) ? 5000 : betweenDelay);
                         scheduleNext(delay);
                     }, afterClickDelay);
@@ -920,9 +1108,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
         }
 
-        // Yakalama gerekiyorsa ONAY gelmeden ilk tıklamayı yapma.
-        // Onay gelmezse inject.js sayfaya ulaşmamıştır; bunu sessizce geçmek
-        // yerine log'a yazıp klasik yönteme geçiyoruz.
         function startDownload() {
             if (!config.captureOnClick) {
                 processNext();
@@ -932,8 +1117,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 if (!hazir) {
                     captureDisabled = true;
                     log("inject.js sayfaya ulaşmadı - klasik tıklama yöntemi kullanılacak");
-                    downloadLog.push(`[${getTimestamp()}] ! inject.js yanıt vermedi (sayfaya yüklenmemiş) -> klasik tıklama yöntemi`);
-                    downloadLog.push(`    Cözüm: eklentiyi chrome://extensions/ üzerinden reload edip SAYFAYI da yenileyin.`);
                 } else {
                     log("Sessiz yakalama hazır.");
                 }
@@ -942,6 +1125,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
 
         startDownload();
+    });
+}
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "scan") {
+        const targets = getTargets();
+        const items = targets.map(t => ({ title: t.title, type: findDocType(t) }));
+        sendResponse({ count: targets.length, items: items });
+    }
+    else if (request.action === "stop") {
+        requestStop();
+        sendResponse({ stopped: true });
+    }
+    else if (request.action === "download") {
+        if (downloadState.active) {
+            console.warn("[Miner] Zaten bir indirme sürüyor, yeni istek yok sayıldı.");
+            sendResponse({ started: false, reason: "already_running" });
+            return;
+        }
+        sendResponse({ started: true });
+        startDownloadProcess(request);
     }
 });
 
